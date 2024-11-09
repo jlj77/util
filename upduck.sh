@@ -19,8 +19,8 @@
 #  2 = failure to find wget on the system
 #  3 = no domain provided, by command option or environment variable
 #  4 = no token provided, by command option or...
-#  5 = DuckDNS returned a 'normal' bad response (check inputs)
-#  6 = DuckDNS returned an unexpected error / response
+#  5 = Duck DNS returned a 'normal' bad response (check inputs)
+#  6 = Duck DNS returned an unexpected error / response
 #
 #####
 #

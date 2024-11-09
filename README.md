@@ -17,5 +17,5 @@ _NOTE: command line options override environment variables._
 2. Failure to find wget on the system
 3. No domain provided, by command option or environment variable
 4. No token provided, by command option or...
-5. DuckDNS returned a 'normal' bad response (check inputs)
-6. DuckDNS returned an unexpected error / response
+5. Duck DNS returned a 'normal' bad response (check inputs)
+6. Duck DNS returned an unexpected error / response
