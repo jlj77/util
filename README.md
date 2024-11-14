@@ -8,9 +8,12 @@ Some simple scripts. For fun / personal use.
 ### Available environment variables*
 - $DUCKDNS_DOMAIN: The domain you want to update
 - $DUCKDNS_TOKEN: The token to use to authenticate the request
+- $DUCKDNS_IP: (Optional) The IP address that the provided domain
+                should resolve to — Duck DNS will detect and use
+                the source IP otherwise
 
 *All other [Duck DNS API](https://www.duckdns.org/spec.jsp) options
-are optional; I may implement them later.
+are optional; I'm aiming for feature parity in the future.
 
 _NOTE: command line options override environment variables._
 

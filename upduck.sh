@@ -6,6 +6,9 @@
 #  Available environment variables*:
 #    - $DUCKDNS_DOMAIN: The domain you want to update
 #    - $DUCKDNS_TOKEN: The token to use to authenticate the request
+#    - $DUCKDNS_IP: (Optional) The IP address that the provided domain
+#                    should resolve to — Duck DNS will detect and use
+#                    the source IP otherwise
 #
 #  *All other Duck DNS API options are optional; I may implement them later.
 #
@@ -33,12 +36,16 @@ fi
 # Tell wget to (succinctly) write to stdout
 wgetopt="-qO -"
 
+# Strip the script's path, for usage message
+name=$(basename "$0")
+
 # Reset arguments, including getopts index
 OPTIND=1
 dn=""
 tkn=""
+ip_a=""
 
-while getopts "d:h?t:" flag; do
+while getopts "d:hi:?t:" flag; do
   case "$flag" in
   d)
     dn=${OPTARG}
@@ -46,12 +53,15 @@ while getopts "d:h?t:" flag; do
   t)
     tkn=${OPTARG}
     ;;
+  i)
+    ip_a=${OPTARG}
+    ;;
   h)
-    echo "Usage: $0 [-d domain] [-t token]"
+    printf "Usage: %s [-d domain] [-t token] [-i]\n\t-i\tIP address (detected, if not specified)\n" "$name"
     exit 0
     ;;
   \?)
-    echo "Usage: $0 [-d domain] [-t token]" >&2
+    echo "Usage: $name [-d domain] [-t token] [-i IP address]" >&2
     exit 1
     ;;
   esac
@@ -77,13 +87,31 @@ if [[ -z $tkn ]]; then
   fi
 fi
 
-resp=$(wget $wgetopt "https://www.duckdns.org/update?domains=$dn&token=$tkn")
-if [ "$resp" == "OK" ]; then
+# Check whether an IP address has been provided
+if [[ -z $ip_a ]]; then
+  if [[ -n $DUCKDNS_IP ]]; then
+    ip_a=$DUCKDNS_IP
+  fi
+fi
+
+# Include an IP address in the API call, if available
+if [[ -z $ip_a ]]; then
+  # shellcheck disable=SC2086
+  resp=$(wget $wgetopt "https://www.duckdns.org/update?domains=$dn&token=$tkn")
+else
+  # shellcheck disable=SC2086
+  resp=$(wget $wgetopt "https://www.duckdns.org/update?domains=$dn&token=$tkn&ip=$ip_a")
+fi
+
+# Parse the response from Duck DNS
+if [ "$resp" == "OK" ] && [ -n "$ip_a" ]; then
+  echo "Success! Domain $dn now resolves to $ip_a."
+elif [ "$resp" == "OK" ]; then
   echo "Success! Domain $dn is up-to-date."
 elif [ "$resp" == "KO" ]; then
   echo "Error: update failed :( Try a different domain or token." >&2
   exit 5
 else
-  echo "Error: DuckDNS response: $resp." >&2
+  echo "Error: Duck DNS response: $resp." >&2
   exit 6
 fi
