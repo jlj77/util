@@ -2,9 +2,36 @@
 """
 PCAP Activity Analyser
 
-This script analyses pcap files in the current directory and reports on network activity
-patterns by counting files generated in 24-hour periods. It extracts timestamps from
-filenames to identify periods of high network activity.
+This script analyses pcap files and reports on network activity patterns by counting 
+files generated in 24-hour periods. It extracts timestamps from filenames to identify 
+periods of high network activity.
+
+Key Features:
+- Group files by 24-hour periods and identify peak activity times
+- Filter for unencrypted traffic only (requires tshark)
+- Show top N most active files with configurable sorting
+- Create zip files for specific periods
+- Recursive directory searching
+
+Unencrypted Traffic Analysis:
+When using --unencrypted-only, the script:
+1. Analyses each pcap file using tshark to determine encryption levels
+2. Filters to files with ≥N% unencrypted traffic (default: 10%)
+3. Includes files with failed analysis (conservative approach)
+4. Automatically sorts top files by unencrypted percentage (not file size)
+5. All subsequent analysis (periods, zipping, etc.) uses the filtered subset
+
+Sorting Options for Top Files:
+- 'size': Sort by file size (default for regular analysis)
+- 'frequency': Sort by files created in the same hour
+- 'unencrypted_pct': Sort by unencrypted traffic percentage (auto-selected with --unencrypted-only)
+
+Dependencies:
+- Python 3.6+
+- tshark (Wireshark CLI tools) for unencrypted traffic analysis
+  - Ubuntu/Debian: sudo apt-get install tshark
+  - CentOS/RHEL: sudo yum install wireshark-cli
+  - macOS: brew install wireshark
 """
 
 import os
@@ -145,7 +172,8 @@ def filter_unencrypted_files(file_info_list, min_unencrypted_pct=10):
         min_unencrypted_pct: Minimum percentage of unencrypted traffic required
     
     Returns:
-        List of file info tuples that meet the unencrypted traffic threshold
+        Tuple of (filtered_file_info_list, encryption_data_dict)
+        where encryption_data_dict maps filepath -> encryption_analysis
     """
     if not check_tshark_available():
         print("Error: tshark is not available but required for unencrypted traffic analysis.")
@@ -157,6 +185,7 @@ def filter_unencrypted_files(file_info_list, min_unencrypted_pct=10):
         raise SystemExit(1)
     
     filtered_files = []
+    encryption_data = {}  # Store encryption analysis for each file
     total_files = len(file_info_list)
     
     print(f"🔍 Analysing {total_files} pcap files for unencrypted traffic...")
@@ -190,12 +219,22 @@ def filter_unencrypted_files(file_info_list, min_unencrypted_pct=10):
             # If analysis fails, include the file (conservative approach)
             filtered_files.append(file_info)
             files_failed_analysis += 1
+            # Store failed analysis data with 0% unencrypted for sorting purposes
+            encryption_data[filepath] = {
+                'unencrypted_pct': 0.0,
+                'total_packets': 0,
+                'unencrypted_packets': 0,
+                'analysis_failed': True
+            }
             print(f"   ⚠️  {filename}: Analysis failed (included)")
             continue
         
         total_packets = encryption_analysis['total_packets']
         unencrypted_packets = encryption_analysis['unencrypted_packets']
         unencrypted_pct = encryption_analysis['unencrypted_pct']
+        
+        # Store encryption data for this file
+        encryption_data[filepath] = encryption_analysis
         
         # Update running statistics
         if total_packets > 0:
@@ -228,7 +267,7 @@ def filter_unencrypted_files(file_info_list, min_unencrypted_pct=10):
     
     print(f"✅ Filtered to {len(filtered_files)} files with ≥{min_unencrypted_pct}% unencrypted traffic")
     
-    return filtered_files
+    return filtered_files, encryption_data
 
 
 def get_file_info(filepath, include_path=False):
@@ -317,14 +356,15 @@ def group_by_24h_periods(file_info_list):
     return dict(periods)
 
 
-def get_top_active_files(file_info_list, top_n=10, sort_by='size'):
+def get_top_active_files(file_info_list, top_n=10, sort_by='size', encryption_data=None):
     """
     Get the top N most active files.
     
     Args:
         file_info_list: List of file info tuples
         top_n: Number of top files to return
-        sort_by: 'size' or 'frequency' (frequency means files with same timestamp pattern)
+        sort_by: 'size', 'frequency', or 'unencrypted_pct' (unencrypted percentage)
+        encryption_data: Dictionary mapping filepath -> encryption analysis (required for 'unencrypted_pct' sort)
     
     Returns:
         List of top file info tuples
@@ -354,6 +394,21 @@ def get_top_active_files(file_info_list, top_n=10, sort_by='size'):
             top_files.extend(files)
         
         return top_files[:top_n]
+    
+    elif sort_by == 'unencrypted_pct':
+        # Sort by unencrypted traffic percentage (descending)
+        if encryption_data is None:
+            print("Warning: encryption_data required for 'unencrypted_pct' sorting, falling back to 'size'")
+            return get_top_active_files(file_info_list, top_n, 'size')
+        
+        def get_unencrypted_pct(file_info):
+            filepath = file_info[2]  # filepath is the third element
+            if filepath in encryption_data:
+                return encryption_data[filepath].get('unencrypted_pct', 0.0)
+            return 0.0
+        
+        sorted_files = sorted(file_info_list, key=get_unencrypted_pct, reverse=True)
+        return sorted_files[:top_n]
     
     else:
         return file_info_list[:top_n]
@@ -514,6 +569,38 @@ def zip_period_files(periods, output_dir=".", zip_prefix="pcap_period"):
     return created_zips
 
 
+def check_unencrypted_zipping_viability(analysis_results, periods_to_zip):
+    """
+    Check if there are enough unencrypted files in periods to make zipping useful.
+    
+    Args:
+        analysis_results: Analysis results dictionary
+        periods_to_zip: Dictionary of periods to zip
+    
+    Returns:
+        Tuple of (is_viable, warning_message)
+    """
+    if not analysis_results.get('unencrypted_only', False):
+        return True, None
+    
+    # Check if any period has a reasonable number of files
+    max_files_in_period = max(len(files) for files in periods_to_zip.values()) if periods_to_zip else 0
+    
+    if max_files_in_period < 5:
+        warning = (
+            f"⚠️  WARNING: Unencrypted traffic analysis found only {max_files_in_period} files "
+            f"in the largest period to zip.\n"
+            f"   This may not provide enough data for meaningful analysis.\n"
+            f"   Consider:\n"
+            f"   - Lowering the --min-unencrypted-pct threshold (currently {analysis_results['min_unencrypted_pct']}%)\n"
+            f"   - Using --top-files to identify specific files of interest\n"
+            f"   - Running without --unencrypted-only to see all traffic patterns"
+        )
+        return False, warning
+    
+    return True, None
+
+
 def get_periods_to_zip(analysis_results, zip_periods_arg):
     """
     Determine which periods to zip based on the zip_periods argument.
@@ -592,7 +679,7 @@ def analyse_pcap_activity(directory=".", min_files_threshold=1, recursive=False,
         min_files_threshold: Minimum number of files to consider a period "active"
         recursive: Whether to search subdirectories
         unencrypted_only: Whether to filter for unencrypted traffic only
-        min_unencrypted_pct: Minimum percentage of unencrypted traffic required
+        min_unencrypted_pct: Minimum percentage of unencrypted traffic required for file inclusion (default: 10). Only used with --unencrypted-only. Files with failed analysis are included conservatively.
     
     Returns:
         Dictionary with analysis results
@@ -613,8 +700,9 @@ def analyse_pcap_activity(directory=".", min_files_threshold=1, recursive=False,
     
     # Filter for unencrypted traffic if requested
     original_count = len(file_info_list)
+    encryption_data = {}  # Initialize encryption_data
     if unencrypted_only:
-        file_info_list = filter_unencrypted_files(file_info_list, min_unencrypted_pct)
+        file_info_list, encryption_data = filter_unencrypted_files(file_info_list, min_unencrypted_pct)
         filtered_count = len(file_info_list)
         print(f"📊 Traffic Analysis: {filtered_count}/{original_count} files contain sufficient unencrypted traffic (≥{min_unencrypted_pct}%)")
     
@@ -656,7 +744,8 @@ def analyse_pcap_activity(directory=".", min_files_threshold=1, recursive=False,
         'recursive': recursive,
         'unencrypted_only': unencrypted_only,
         'min_unencrypted_pct': min_unencrypted_pct,
-        'original_count': original_count
+        'original_count': original_count,
+        'encryption_data': encryption_data
     }
 
 
@@ -730,6 +819,7 @@ def print_analysis_report(analysis_results, min_files_threshold=1, top_files=0, 
         if analysis_results.get('unencrypted_only', False):
             print(f"TOP {top_files} MOST ACTIVE FILES (UNENCRYPTED TRAFFIC ONLY, sorted by {sort_by})")
             print("   (Selected from files with sufficient unencrypted traffic)")
+            print("   Note: These are individual files, not 24-hour periods")
         else:
             print(f"TOP {top_files} MOST ACTIVE FILES (sorted by {sort_by})")
         print("-" * 50)
@@ -737,7 +827,8 @@ def print_analysis_report(analysis_results, min_files_threshold=1, top_files=0, 
         top_file_list = get_top_active_files(
             analysis_results['file_info_list'], 
             top_n=top_files, 
-            sort_by=sort_by
+            sort_by=sort_by,
+            encryption_data=analysis_results['encryption_data']
         )
         
         if top_file_list:
@@ -810,14 +901,14 @@ def main():
     )
     parser.add_argument(
         "--sort-by", 
-        choices=['size', 'frequency'], 
+        choices=['size', 'frequency', 'unencrypted_pct'], 
         default='size', 
-        help="Sort top files by 'size' or 'frequency' (default: size)"
+        help="Sort top files by 'size' (file size), 'frequency' (files per hour), or 'unencrypted_pct' (unencrypted traffic percentage). Auto-selected to 'unencrypted_pct' when using --unencrypted-only"
     )
     parser.add_argument(
         "--zip-periods", 
         type=str, 
-        help="Create zip files for periods. Options: 'all', 'active', 'topN', or specific date (YYYY-MM-DD)"
+        help="Create zip files for periods. Options: 'all', 'active', 'topN', or specific date (YYYY-MM-DD). 'topN' zips top N periods by file count."
     )
     parser.add_argument(
         "--zip-output-dir", 
@@ -837,16 +928,21 @@ def main():
     parser.add_argument(
         "--unencrypted-only", 
         action="store_true", 
-        help="Filter for unencrypted traffic only. This affects ALL analysis (periods, top files, zipping, etc.)"
+        help="Filter for unencrypted traffic only (requires tshark). Analyzes each file and filters to those with ≥N%% unencrypted traffic. Affects ALL analysis (periods, top files, zipping). Auto-selects 'unencrypted_pct' sorting for top files."
     )
     parser.add_argument(
         "--min-unencrypted-pct", 
         type=int, 
         default=10, 
-        help="Minimum percentage of unencrypted traffic required (default: 10). Only used with --unencrypted-only"
+        help="Minimum percentage of unencrypted traffic required for file inclusion (default: 10). Only used with --unencrypted-only. Files with failed analysis are included conservatively."
     )
     
     args = parser.parse_args()
+    
+    # Auto-select unencrypted_pct sorting when using --unencrypted-only
+    if args.unencrypted_only and args.sort_by == 'size':
+        args.sort_by = 'unencrypted_pct'
+        print("ℹ️  Auto-selected 'unencrypted_pct' sorting for --unencrypted-only analysis")
     
     # Analyse pcap activity
     analysis_results = analyse_pcap_activity(
@@ -877,6 +973,21 @@ def main():
             periods_to_zip = get_periods_to_zip(analysis_results, args.zip_periods)
             
             if periods_to_zip:
+                # Check if unencrypted zipping is viable
+                is_viable, warning_message = check_unencrypted_zipping_viability(analysis_results, periods_to_zip)
+                if warning_message:
+                    print(f"\n{warning_message}")
+                    if not is_viable:
+                        print("\n❓ Continue with zipping anyway? (y/N)")
+                        try:
+                            response = input().strip().lower()
+                            if response not in ['y', 'yes']:
+                                print("⏹️  Zipping cancelled by user.")
+                                return
+                        except KeyboardInterrupt:
+                            print("\n⏹️  Zipping cancelled by user.")
+                            return
+                
                 print(f"Found {len(periods_to_zip)} periods to zip:")
                 for date, files in periods_to_zip.items():
                     print(f"  {date}: {len(files)} files")
